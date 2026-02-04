@@ -33,12 +33,34 @@ var DEFAULT_SETTINGS = {
     {
       name: "OpenAI",
       baseUrl: "https://api.openai.com/v1",
-      models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]
+      apiKey: "",
+      models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+      enabled: true,
+      apiFormat: "openai"
     },
     {
       name: "OpenRouter",
       baseUrl: "https://openrouter.ai/api/v1",
-      models: ["anthropic/claude-3.5-sonnet", "anthropic/claude-3-opus", "openai/gpt-4o", "google/gemini-pro-1.5"]
+      apiKey: "",
+      models: ["anthropic/claude-3.5-sonnet", "anthropic/claude-3-opus", "openai/gpt-4o", "google/gemini-pro-1.5"],
+      enabled: true,
+      apiFormat: "openai"
+    },
+    {
+      name: "Anthropic",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "",
+      models: ["claude-sonnet-4-5", "claude-sonnet-4-5-thinking", "claude-opus-4-5-thinking"],
+      enabled: true,
+      apiFormat: "anthropic"
+    },
+    {
+      name: "Google",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "",
+      models: ["gemini-2.5-flash", "gemini-2.5-flash-thinking", "gemini-3-flash", "gemini-3-pro-high", "gemini-3-pro-low"],
+      enabled: true,
+      apiFormat: "google"
     }
   ]
 };
@@ -709,11 +731,13 @@ var RabbitMapView = class extends import_obsidian.TextFileView {
     const provider = this.plugin.settings.providers.find((p) => p.name === chatState.provider);
     if (!provider)
       return;
-    let apiKey = "";
-    if (chatState.provider === "OpenAI") {
-      apiKey = this.plugin.settings.openaiApiKey;
-    } else if (chatState.provider === "OpenRouter") {
-      apiKey = this.plugin.settings.openrouterApiKey;
+    let apiKey = provider.apiKey || "";
+    if (!apiKey) {
+      if (chatState.provider === "OpenAI" && this.plugin.settings.openaiApiKey) {
+        apiKey = this.plugin.settings.openaiApiKey;
+      } else if (chatState.provider === "OpenRouter" && this.plugin.settings.openrouterApiKey) {
+        apiKey = this.plugin.settings.openrouterApiKey;
+      }
     }
     if (!apiKey) {
       const errorMsg = {
@@ -1538,11 +1562,13 @@ ${msg.content}
       const provider = this.plugin.settings.providers.find((p) => p.name === chatState.provider);
       if (!provider)
         return;
-      let apiKey = "";
-      if (chatState.provider === "OpenAI") {
-        apiKey = this.plugin.settings.openaiApiKey;
-      } else if (chatState.provider === "OpenRouter") {
-        apiKey = this.plugin.settings.openrouterApiKey;
+      let apiKey = provider.apiKey || "";
+      if (!apiKey) {
+        if (chatState.provider === "OpenAI" && this.plugin.settings.openaiApiKey) {
+          apiKey = this.plugin.settings.openaiApiKey;
+        } else if (chatState.provider === "OpenRouter" && this.plugin.settings.openrouterApiKey) {
+          apiKey = this.plugin.settings.openrouterApiKey;
+        }
       }
       if (!apiKey) {
         const errorMsg = {
@@ -1611,6 +1637,18 @@ ${msg.content}
     });
   }
   async callLLM(provider, apiKey, model, messages, context = "", systemPrompt = "") {
+    const apiFormat = provider.apiFormat || "openai";
+    switch (apiFormat) {
+      case "anthropic":
+        return this.callAnthropicAPI(provider, apiKey, model, messages, context, systemPrompt);
+      case "google":
+        return this.callGoogleAPI(provider, apiKey, model, messages, context, systemPrompt);
+      case "openai":
+      default:
+        return this.callOpenAIAPI(provider, apiKey, model, messages, context, systemPrompt);
+    }
+  }
+  async callOpenAIAPI(provider, apiKey, model, messages, context, systemPrompt) {
     var _a, _b;
     const headers = {
       "Content-Type": "application/json",
@@ -1634,7 +1672,8 @@ ${msg.content}
     for (const m of messages) {
       apiMessages.push({ role: m.role, content: m.content });
     }
-    const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+    const baseUrl = provider.baseUrl.replace(/\/+$/, "");
+    const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -1648,6 +1687,105 @@ ${msg.content}
     }
     const data = await response.json();
     return ((_b = (_a = data.choices[0]) == null ? void 0 : _a.message) == null ? void 0 : _b.content) || "No response";
+  }
+  async callAnthropicAPI(provider, apiKey, model, messages, context, systemPrompt) {
+    const headers = {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    };
+    const systemParts = [];
+    if (systemPrompt) {
+      systemParts.push(systemPrompt);
+    }
+    if (context) {
+      systemParts.push(context);
+    }
+    const apiMessages = [];
+    for (const m of messages) {
+      apiMessages.push({ role: m.role, content: m.content });
+    }
+    const requestBody = {
+      model,
+      max_tokens: 4096,
+      messages: apiMessages
+    };
+    if (systemParts.length > 0) {
+      requestBody.system = systemParts.join("\n\n");
+    }
+    const baseUrl = provider.baseUrl.replace(/\/+$/, "");
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody)
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Anthropic API error: ${response.status} - ${error}`);
+    }
+    const data = await response.json();
+    if (data.content && Array.isArray(data.content)) {
+      return data.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+    }
+    return "No response";
+  }
+  async callGoogleAPI(provider, apiKey, model, messages, context, systemPrompt) {
+    var _a, _b;
+    const systemParts = [];
+    if (systemPrompt) {
+      systemParts.push(systemPrompt);
+    }
+    if (context) {
+      systemParts.push(context);
+    }
+    const contents = [];
+    for (const m of messages) {
+      contents.push({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }]
+      });
+    }
+    const requestBody = {
+      contents
+    };
+    if (systemParts.length > 0) {
+      requestBody.systemInstruction = {
+        parts: [{ text: systemParts.join("\n\n") }]
+      };
+    }
+    const baseUrl = provider.baseUrl.replace(/\/+$/, "");
+    const response = await fetch(`${baseUrl}/models/${model}:generateContent?key=${apiKey}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(requestBody)
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Google API error: ${response.status} - ${error}`);
+    }
+    const data = await response.json();
+    if (data.candidates && ((_b = (_a = data.candidates[0]) == null ? void 0 : _a.content) == null ? void 0 : _b.parts)) {
+      const parts = data.candidates[0].content.parts;
+      const resultParts = [];
+      for (const part of parts) {
+        if (part.text) {
+          resultParts.push(part.text);
+        } else if (part.inlineData) {
+          const { mimeType, data: base64Data } = part.inlineData;
+          const dataUrl = `data:${mimeType};base64,${base64Data}`;
+          resultParts.push(`
+
+![Generated Image](${dataUrl})
+
+`);
+        }
+      }
+      return resultParts.join("") || "No response";
+    }
+    return "No response";
   }
   renderChatMessage(container, msg, nodeId, msgIndex) {
     const msgEl = container.createDiv({
@@ -2004,7 +2142,7 @@ var SettingsModal = class extends import_obsidian.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("rabbitmap-settings-modal");
-    contentEl.createEl("h2", { text: "API Settings" });
+    contentEl.createEl("h2", { text: "Provider Settings" });
     const aboutSection = contentEl.createDiv({ cls: "rabbitmap-about-section" });
     aboutSection.createEl("p", {
       text: "This RabbitMap plugin is part of "
@@ -2025,79 +2163,128 @@ var SettingsModal = class extends import_obsidian.Modal {
       href: "https://discord.gg/UeUBkmxEcV"
     });
     aboutText.appendText("!");
-    new import_obsidian.Setting(contentEl).setName("OpenAI API Key").setDesc("Enter your OpenAI API key").addText(
-      (text) => text.setPlaceholder("sk-...").setValue(this.plugin.settings.openaiApiKey).onChange(async (value) => {
-        this.plugin.settings.openaiApiKey = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(contentEl).setName("OpenRouter API Key").setDesc("Enter your OpenRouter API key").addText(
-      (text) => text.setPlaceholder("sk-or-...").setValue(this.plugin.settings.openrouterApiKey).onChange(async (value) => {
-        this.plugin.settings.openrouterApiKey = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    contentEl.createEl("h3", { text: "OpenRouter Models" });
-    contentEl.createEl("p", {
-      text: "Add custom models for OpenRouter. Leave empty to use defaults.",
-      cls: "setting-item-description"
-    });
-    const inputRow = contentEl.createDiv({ cls: "rabbitmap-models-input-row" });
-    const modelInput = inputRow.createEl("input", {
-      type: "text",
-      placeholder: "e.g. anthropic/claude-3.5-sonnet",
-      cls: "rabbitmap-models-input"
-    });
-    const addButton = inputRow.createEl("button", {
-      text: "Add",
-      cls: "rabbitmap-models-add-btn"
-    });
-    const modelsList = contentEl.createDiv({ cls: "rabbitmap-models-list" });
-    const renderModelsList = () => {
-      modelsList.empty();
-      const models = this.plugin.settings.customOpenRouterModels.split("\n").map((m) => m.trim()).filter((m) => m.length > 0);
-      if (models.length === 0) {
-        modelsList.createEl("div", {
-          text: "No custom models. Using defaults.",
-          cls: "rabbitmap-models-empty"
-        });
-        return;
-      }
-      for (const model of models) {
-        const item = modelsList.createDiv({ cls: "rabbitmap-models-item" });
-        item.createSpan({ text: model, cls: "rabbitmap-models-name" });
-        const removeBtn = item.createEl("button", {
-          text: "\xD7",
-          cls: "rabbitmap-models-remove-btn"
-        });
-        removeBtn.onclick = async () => {
-          const currentModels = this.plugin.settings.customOpenRouterModels.split("\n").map((m) => m.trim()).filter((m) => m.length > 0 && m !== model);
-          this.plugin.settings.customOpenRouterModels = currentModels.join("\n");
+    const providersContainer = contentEl.createDiv({ cls: "rabbitmap-providers-container" });
+    const renderProviders = () => {
+      providersContainer.empty();
+      for (let i = 0; i < this.plugin.settings.providers.length; i++) {
+        const provider = this.plugin.settings.providers[i];
+        const providerSection = providersContainer.createDiv({ cls: "rabbitmap-provider-section" });
+        const headerRow = providerSection.createDiv({ cls: "rabbitmap-provider-header" });
+        headerRow.createEl("h3", { text: provider.name });
+        const toggleContainer = headerRow.createDiv({ cls: "rabbitmap-provider-toggle" });
+        const toggleLabel = toggleContainer.createEl("label", { cls: "rabbitmap-toggle-label" });
+        const toggleInput = toggleLabel.createEl("input", { type: "checkbox" });
+        toggleInput.checked = provider.enabled;
+        toggleLabel.createSpan({ text: provider.enabled ? "Enabled" : "Disabled" });
+        toggleInput.onchange = async () => {
+          provider.enabled = toggleInput.checked;
+          toggleLabel.querySelector("span").textContent = provider.enabled ? "Enabled" : "Disabled";
           await this.plugin.saveSettings();
+        };
+        new import_obsidian.Setting(providerSection).setName("Base URL").setDesc("API endpoint URL (change for custom/proxy deployments)").addText(
+          (text) => text.setPlaceholder("https://api.example.com/v1").setValue(provider.baseUrl).onChange(async (value) => {
+            provider.baseUrl = value;
+            await this.plugin.saveSettings();
+          })
+        );
+        new import_obsidian.Setting(providerSection).setName("API Key").setDesc(`Enter your ${provider.name} API key`).addText(
+          (text) => text.setPlaceholder("sk-...").setValue(provider.apiKey).onChange(async (value) => {
+            provider.apiKey = value;
+            await this.plugin.saveSettings();
+          })
+        );
+        new import_obsidian.Setting(providerSection).setName("API Format").setDesc("Select the API format for this provider").addDropdown(
+          (dropdown) => dropdown.addOption("openai", "OpenAI Compatible").addOption("anthropic", "Anthropic (Claude)").addOption("google", "Google (Gemini)").setValue(provider.apiFormat || "openai").onChange(async (value) => {
+            provider.apiFormat = value;
+            await this.plugin.saveSettings();
+          })
+        );
+        const modelsHeader = providerSection.createDiv({ cls: "rabbitmap-models-header" });
+        modelsHeader.createEl("h4", { text: "Models" });
+        const inputRow = providerSection.createDiv({ cls: "rabbitmap-models-input-row" });
+        const modelInput = inputRow.createEl("input", {
+          type: "text",
+          placeholder: "e.g. gpt-4o or anthropic/claude-3.5-sonnet",
+          cls: "rabbitmap-models-input"
+        });
+        const addButton = inputRow.createEl("button", {
+          text: "Add",
+          cls: "rabbitmap-models-add-btn"
+        });
+        const modelsList = providerSection.createDiv({ cls: "rabbitmap-models-list" });
+        const renderModelsList = () => {
+          modelsList.empty();
+          if (provider.models.length === 0) {
+            modelsList.createEl("div", {
+              text: "No models configured.",
+              cls: "rabbitmap-models-empty"
+            });
+            return;
+          }
+          for (const model of provider.models) {
+            const item = modelsList.createDiv({ cls: "rabbitmap-models-item" });
+            item.createSpan({ text: model, cls: "rabbitmap-models-name" });
+            const removeBtn = item.createEl("button", {
+              text: "\xD7",
+              cls: "rabbitmap-models-remove-btn"
+            });
+            removeBtn.onclick = async () => {
+              provider.models = provider.models.filter((m) => m !== model);
+              await this.plugin.saveSettings();
+              renderModelsList();
+            };
+          }
+        };
+        addButton.onclick = async () => {
+          const newModel = modelInput.value.trim();
+          if (!newModel)
+            return;
+          if (!provider.models.includes(newModel)) {
+            provider.models.push(newModel);
+            await this.plugin.saveSettings();
+          }
+          modelInput.value = "";
           renderModelsList();
         };
+        modelInput.onkeydown = (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            addButton.click();
+          }
+        };
+        renderModelsList();
       }
-    };
-    addButton.onclick = async () => {
-      const newModel = modelInput.value.trim();
-      if (!newModel)
-        return;
-      const currentModels = this.plugin.settings.customOpenRouterModels.split("\n").map((m) => m.trim()).filter((m) => m.length > 0);
-      if (!currentModels.includes(newModel)) {
-        currentModels.push(newModel);
-        this.plugin.settings.customOpenRouterModels = currentModels.join("\n");
+      const addProviderRow = providersContainer.createDiv({ cls: "rabbitmap-add-provider-row" });
+      const newProviderInput = addProviderRow.createEl("input", {
+        type: "text",
+        placeholder: "New provider name (e.g. Ollama)",
+        cls: "rabbitmap-new-provider-input"
+      });
+      const addProviderBtn = addProviderRow.createEl("button", {
+        text: "Add Provider",
+        cls: "rabbitmap-add-provider-btn"
+      });
+      addProviderBtn.onclick = async () => {
+        const name = newProviderInput.value.trim();
+        if (!name)
+          return;
+        if (this.plugin.settings.providers.some((p) => p.name === name)) {
+          new import_obsidian.Notice(`Provider "${name}" already exists.`);
+          return;
+        }
+        this.plugin.settings.providers.push({
+          name,
+          baseUrl: "https://api.example.com/v1",
+          apiKey: "",
+          models: [],
+          enabled: true
+        });
         await this.plugin.saveSettings();
-      }
-      modelInput.value = "";
-      renderModelsList();
+        newProviderInput.value = "";
+        renderProviders();
+      };
     };
-    modelInput.onkeydown = (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        addButton.click();
-      }
-    };
-    renderModelsList();
+    renderProviders();
     contentEl.createEl("p", {
       text: "Get your API keys from:",
       cls: "rabbitmap-settings-info"
@@ -2111,6 +2298,16 @@ var SettingsModal = class extends import_obsidian.Modal {
     linkContainer.createEl("a", {
       text: "OpenRouter",
       href: "https://openrouter.ai/keys"
+    });
+    linkContainer.createEl("span", { text: " | " });
+    linkContainer.createEl("a", {
+      text: "Google AI Studio",
+      href: "https://aistudio.google.com/apikey"
+    });
+    linkContainer.createEl("span", { text: " | " });
+    linkContainer.createEl("a", {
+      text: "Anthropic Console",
+      href: "https://console.anthropic.com/settings/keys"
     });
   }
   onClose() {
